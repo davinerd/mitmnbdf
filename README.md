@@ -67,7 +67,7 @@ Simply type `sudo python mitmnbdf.py`. Be sure to edit the config file and add y
 Of course, you have already mitm'd your victim(s) (use your favourite tool)
 To run a quick test, you can setup two VMs as follow:
 
-### VM A (mitmnbdf)
+#### VM A (mitmnbdf)
 ```
 ~$ ifconfig eth0
 eth0      Link encap:Ethernet  HWaddr 00:0c:29:32:0e:37  
@@ -95,7 +95,7 @@ proxyMode = transparent  # <-- this is important!!!
 ~/mitmnbdf$ sudo python mitmnbdf.py
 ```
 
-### VM B (victim)
+#### VM B (victim)
 
 ```
 ~$ ifconfig eth0
