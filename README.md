@@ -55,6 +55,12 @@ I tried to work with Josh to redesign the code, but he has his ideas and way to 
 ## How to install
 You need to install the python packages listed in `requirements.txt` (hint: `sudo pip install -r requirements.txt`). Before doing that, you need to install `libarchive-dev` from your packet manager. (`sudo apt-get install libarchive-dev` on Debian/Ubuntu).
 
+You need to initialise the `bdf` submodule, so:
+```
+~/mitmnbdf$ git submodule init
+~/mitmnbdf$ git submodule update
+```
+
 ## How to use
 Simply type `sudo python mitmnbdf.py`. Be sure to edit the config file and add your IP addresses and ports in the `[targets]` section.
 
