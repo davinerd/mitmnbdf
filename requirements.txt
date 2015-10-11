@@ -2,3 +2,5 @@ libarchive-c==2.1
 python-magic==0.4.6
 configobj==5.0.6
 mitmproxy==0.11.3
+capstone==3.0.4
+pefile==1.2.10-114
